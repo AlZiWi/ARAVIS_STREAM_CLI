@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <setjmp.h>
 #include <arv.h>
 #include <jpeglib.h>
@@ -85,7 +86,7 @@ static void usage(const char *program) {
     "  -stream              Write binary frame records to stdout\n"
     "  -format=mjpeg|raw    Output format (default: mjpeg)\n"
     "  -debug               Print initialization and streaming diagnostics\n"
-    "  -exposure=<auto|units> Set exposure; units are 0.0001 seconds\n"
+    "  -exposure=<auto|microseconds> Set exposure time in microseconds\n"
 #ifdef ARAVIS_CLI_HAS_PREVIEW
     "  -preview             Display the image stream with metadata\n"
 #endif
@@ -114,7 +115,8 @@ static int parse_exposure(const char *value, uint32_t *exposure, int *auto_mode)
   errno = 0;
   parsed = strtoull(value, &end, 10);
   if (errno || *value == '\0' || *end != '\0' || parsed == 0 || parsed > UINT32_MAX) {
-    fprintf(stderr, "Invalid exposure: %s (expected auto or a positive unit value)\n", value);
+    fprintf(stderr, "Invalid exposure: %s (expected auto or a positive microsecond value)\n",
+      value);
     return 0;
   }
   *exposure = (uint32_t) parsed;
@@ -329,11 +331,19 @@ static int save_frame(const capture_options_t *options, ArvBuffer *buffer,
     const frame_payload_t *payload) {
   char filename[512];
   FILE *file;
-  uint64_t timestamp = arv_buffer_get_system_timestamp(buffer);
+  struct timespec system_time;
+  unsigned int seconds;
+  unsigned int milliseconds;
   if (!options->out_dir) return 1;
-  if (snprintf(filename, sizeof(filename), "%s/frame_%06llu_%llu.%s",
-      options->out_dir, (unsigned long long) arv_buffer_get_frame_id(buffer),
-      (unsigned long long) timestamp,
+  if (clock_gettime(CLOCK_REALTIME, &system_time) != 0) {
+    perror("clock_gettime");
+    return 0;
+  }
+  seconds = (unsigned int) (system_time.tv_sec % 10000);
+  milliseconds = (unsigned int) (system_time.tv_nsec / 1000000);
+  if (snprintf(filename, sizeof(filename), "%s/frame_%06u_%04u-%03u.%s",
+      options->out_dir, (unsigned int) arv_buffer_get_frame_id(buffer),
+      seconds, milliseconds,
       options->format == OUTPUT_FORMAT_MJPEG ? "jpg" : "raw") >= (int) sizeof(filename)) {
     fprintf(stderr, "Output path is too long\n");
     return 0;
@@ -405,32 +415,37 @@ static int configure_camera(ArvCamera *camera, const capture_options_t *options)
     if (options->exposure_auto) {
       arv_camera_set_exposure_time_auto(camera, ARV_AUTO_CONTINUOUS, &error);
     } else {
-      const double requested_us = options->exposure * 100.0;
+      const double requested_us = options->exposure;
+      double applied_us = requested_us;
       arv_camera_get_exposure_time_bounds(camera, &exposure_min, &exposure_max, &error);
       exposure_increment = arv_camera_get_exposure_time_increment(camera, &error);
-      {
-        const double increment_count =
-          exposure_increment > 0.0 ?
-            (requested_us - exposure_min) / exposure_increment : 0.0;
-        const int increment_valid = exposure_increment <= 0.0 ||
-          fabs(increment_count - round(increment_count)) <= 1e-6;
       if (!check_error(&error, "get exposure range") || requested_us < exposure_min ||
-          requested_us > exposure_max ||
-          !increment_valid) {
+          requested_us > exposure_max) {
         fprintf(stderr, "Exposure %u is outside camera range or resolution "
           "(%.3f-%.3f us, increment %.3f us)\n", options->exposure,
           exposure_min, exposure_max, exposure_increment);
         return 0;
       }
+      if (exposure_increment > 0.0) {
+        const double increment_count =
+          ceil((requested_us - exposure_min) / exposure_increment - 1e-9);
+        applied_us = exposure_min + increment_count * exposure_increment;
+        if (applied_us > exposure_max + 1e-6) {
+          fprintf(stderr, "Exposure %u rounds above camera maximum %.3f us "
+            "(requested %.3f us, increment %.3f us)\n", options->exposure,
+            exposure_max, requested_us, exposure_increment);
+          return 0;
+        }
+        if (options->debug && fabs(applied_us - requested_us) > 1e-6)
+          fprintf(stderr, "[debug] exposure rounded from %.3f us to %.3f us\n",
+            requested_us, applied_us);
       }
       arv_camera_set_exposure_time_auto(camera, ARV_AUTO_OFF, &error);
       if (!check_error(&error, "set manual exposure mode")) return 0;
-      arv_camera_set_exposure_time(camera, requested_us, &error);
+      arv_camera_set_exposure_time(camera, applied_us, &error);
     }
     if (!check_error(&error, "set exposure")) return 0;
   }
-  arv_camera_set_acquisition_mode(camera, ARV_ACQUISITION_MODE_CONTINUOUS, &error);
-  if (!check_error(&error, "set continuous acquisition mode")) return 0;
   if (options->debug)
     fprintf(stderr, "[debug] requested stream: %dx%d at %d fps, pixel format %s\n",
       width, height, options->fps,
@@ -472,7 +487,7 @@ int main(int argc, char **argv) {
   {
     const guint payload_size = arv_camera_get_payload(camera, &error);
     if (!check_error(&error, "get stream payload size")) goto cleanup;
-    for (unsigned int index = 0; index < 16; ++index)
+    for (unsigned int index = 0; index < 50; ++index)
       arv_stream_push_buffer(stream, arv_buffer_new_allocate(payload_size));
   }
 #ifdef ARAVIS_CLI_HAS_PREVIEW

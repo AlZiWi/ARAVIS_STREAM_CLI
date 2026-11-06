@@ -74,9 +74,9 @@ The `-format=mjpeg` and `-format=raw` choices apply to both `-out` files and
 `.raw`. JPEG encoding supports Mono8, RGB8 packed, and BGR8 packed camera
 formats; unsupported formats fail explicitly.
 
-The exposure value uses 0.0001-second units, matching the original UVC CLI;
-Aravis receives the converted microsecond value. Use `-exposure auto` for
-continuous automatic exposure. `-stream` writes an `ARVF` binary record for
+The exposure value is specified directly in microseconds. Use
+`-exposure=auto` for continuous automatic exposure. `-stream` writes an
+`ARVF` binary record for
 each frame to standard output. The record's `frame_bytes` and payload contain
 the selected representation; `frame_format` contains the Aravis pixel-format
 value for raw records or the `MJPG` fourcc (`0x47504a4d`) for JPEG records.
